@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from selenium import webdriver
 from time import sleep
 from selenium.webdriver.common.keys import Keys
@@ -89,7 +91,7 @@ class FaceBookDriver(webdriver.Firefox):
         :param page: Link to the facebook page to be scraped.
         :return: Pandas dataframe with the contents of the page.
         """
-        columns = ['author', 'timestamp', 'link', 'content', 'video_thumbnail']
+        columns = ['author', 'timestamp', 'link', 'text', 'video_thumbnail']
         columns = columns + ['comment_' + str(comment) for comment in range(self.max_comments)]
         columns = columns + ['image_' + str(image) for image in range(self.max_images)]
         contents = pd.DataFrame(columns=columns)
@@ -131,32 +133,38 @@ class FaceBookDriver(webdriver.Firefox):
         :param entry: Web element of the entry, obtained through the drivers find_element(s) method.
         :return: Entries of the post as a pandas dataframe row.
         """
+        # ToDo: Handle text-only post.
+
         content = {}
-        content['timestamp'] = entry.find_element_by_xpath(
-            ".//*[starts-with(@class, '_5ptz')]").get_attribute('title')
-        content['author'] = entry.text.split('\n')[0]
 
-        # ToDo: Handle - shared a post - get image.
-        if 'post_message' in entry.get_attribute('innerHTML'):
-            content['text'] = entry.find_element_by_xpath(".//*[@data-testid = 'post_message']").text
+        content['author'] = entry.find_element_by_xpath(".//span[starts-with(@class, 'fwb')]/a").text
+        timestamp = entry.find_element_by_xpath(".//*[starts-with(@class, '_5ptz')]").get_attribute('title')
+        content['timestamp'] = datetime.strptime(timestamp, "%m/%d/%y, %H:%M %p")
+        postdate = content['timestamp'].date().isoformat()
 
-        elif "shared a link" in entry.text:
+        try:
+            content['text'] = entry.find_element_by_xpath(".//*[@data-testid='post_message']").text
+        except NoSuchElementException:
+            content['text'] = ''
+
+        if "shared a link" in entry.text:
             content['link'] = self.scrape_link(entry)
-
         else:
-            entry.find_element_by_xpath(".//*[@rel = 'theater']").click()
-            random_sleep(1)
-            Wait(self).until(EC.presence_of_element_located((By.XPATH, "//span[@id='fbPhotoSnowliftTimestamp']")))
-            image = self.find_element_by_class_name('spotlight')
-            if image.is_displayed():
+            content['link'] = ""
+
+        if not content['link']:
+            try:
+                entry.find_element_by_xpath(".//*[@rel = 'theater']").click()
+                random_sleep(1)
+                Wait(self).until(EC.presence_of_element_located((By.XPATH, "//span[@id='fbPhotoSnowliftTimestamp']")))
                 images = self.scrape_images()
                 for n in list(range(len(images)))[: self.max_images]:
                     content['image_' + str(n)] = images[n]
 
-            elif not image.is_displayed():
-                date = content['timestamp'].date().isoformat()
+            except NoSuchElementException:
                 content['video_thumbnail'] = self.scrape_video_thumbnail(entry=entry, author=content['author'],
-                                                                         date=date)
+                                                                         date=postdate)
+
         comments = self.scrape_comments(entry)
         if comments:
             for n in list(range(len(comments)))[: self.max_comments]:
@@ -225,7 +233,7 @@ class FaceBookDriver(webdriver.Firefox):
             if next_button.is_displayed():
                 ActionChains(self).move_to_element(next_button).perform()
                 next_button.click()
-                Wait(self).until(EC.presence_of_element_located((By.XPATH, "//span[@id='fbPhotoSnowliftTimestamp']")))
+                random_sleep(1)
             else:
                 break
 
@@ -241,7 +249,8 @@ class FaceBookDriver(webdriver.Firefox):
         :param date: Date of the post, to be written to the filename.
         :return: File path of the video thumbnail.
         """
-        thumbnail = entry.find_element_by_xpath(".//img[@class='_3chq']").get_attribute("src")
+        author = author.replace(" ", "_")
+        thumbnail = entry.find_element_by_xpath(".//img[starts-with(@class, '_1445')]")
         filename = f"{self.thumbnails_folder}/{author}_{date}.png"
         with open(filename, 'wb') as output:
             output.write(thumbnail.screenshot_as_png)
