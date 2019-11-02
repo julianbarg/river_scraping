@@ -372,7 +372,7 @@ def main():
         elif page['type'] == 'page':
             result = driver.scrape_page(f"https://www.facebook.com/{page['id']}/posts/", _type="page")
 
-        results['page'] = page['name']
+        result['page'] = page['name']
         results = results + [result]
 
     return results
