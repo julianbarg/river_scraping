@@ -4,7 +4,7 @@ from selenium import webdriver
 from time import sleep
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver import ActionChains
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, ElementClickInterceptedException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -16,6 +16,10 @@ import re
 import pandas as pd
 
 Wait = partial(WebDriverWait, timeout=15)
+
+
+class TooManyAttemptsError(TimeoutException):
+    pass
 
 
 def random_sleep(sec: int):
@@ -43,7 +47,7 @@ def access_group(driver: webdriver, name: str):
 class FaceBookDriver(webdriver.Firefox):
     def __init__(self, username: str, password: str, firefox_profile=None, firefox_binary=None,
                  images_folder: str = "./images", thumbnails_folder: str = "./thumbnails", max_comments=25,
-                 max_images=10, max_scroll_depth=None, timeout=30, capabilities=None, proxy=None,
+                 max_images=10, max_scroll_depth=None, max_attempts=10, timeout=30, capabilities=None, proxy=None,
                  executable_path='geckodriver', options=None, service_log_path='geckodriver.log', firefox_options=None,
                  service_args=None, desired_capabilities=None, log_path=None, keep_alive=True):
         """
@@ -64,7 +68,13 @@ class FaceBookDriver(webdriver.Firefox):
         self.max_comments = max_comments
         self.max_images = max_images
         self.max_scroll_depth = max_scroll_depth
+        self.max_attempts = max_attempts
+        self.attempts = 0
 
+        self.xpaths = {"group": {"entries": "//div[starts-with(@id, 'mall_post_')]"},
+                       "page": {
+                           "entries": "//div[@id = 'pagelet_timeline_main_column']//div[@class = '_4-u2 _4-u8']"}
+                       }
         self.login_fb()
 
     def login_fb(self):
@@ -85,22 +95,42 @@ class FaceBookDriver(webdriver.Firefox):
 
         # Wait(self).until(EC.presence_of_element_located((By.ID, "newsFeedHeading")))
 
-    def scrape_page(self, page: str):
+    def load_page(self, page: str, _type: str):
+        """
+        Load a page.
+        :param page: Link to the site.
+        :param _type: Whether the page is a facebook group or a facebook page.
+        """
+
+        if self.attempts > self.max_attempts:
+            raise TooManyAttemptsError
+
+        self.get(page)
+        random_sleep(1)
+
+        try:
+            Wait(self).until(EC.presence_of_element_located((By.XPATH, self.xpaths[_type]["entries"])))
+            random_sleep(1)
+        except TimeoutException:
+            self.attempts += 1
+            self.load_page(page=page, _type=_type)
+
+    def scrape_page(self, page: str, _type: str):
         """
         Load and scrape one specific page.
         :param page: Link to the facebook page to be scraped.
-        :return: Pandas dataframe with the contents of the page.
+        :param _type: Whether the page is a facebook group or a facebook page.
+        :return: Dictionary with the contents of the page.
         """
         columns = ['author', 'timestamp', 'link', 'text', 'video_thumbnail']
         columns = columns + ['comment_' + str(comment) for comment in range(self.max_comments)]
         columns = columns + ['image_' + str(image) for image in range(self.max_images)]
         contents = pd.DataFrame(columns=columns)
 
-        self.get(page)
-        Wait(self).until(EC.presence_of_element_located((By.ID, "newsFeedHeading")))
+        self.load_page(page=page, _type=_type)
         self.scroll_to_bottom()
 
-        entries = self.find_elements_by_xpath("//div[starts-with(@id, 'mall_post_')]")
+        entries = self.find_elements_by_xpath(self.xpaths[_type]["entries"])
 
         for entry in entries:
             content = self.scrape_entry(entry=entry)
@@ -140,7 +170,10 @@ class FaceBookDriver(webdriver.Firefox):
         content['author'] = entry.find_element_by_xpath(".//span[starts-with(@class, 'fwb')]/a").text
         timestamp = entry.find_element_by_xpath(".//*[starts-with(@class, '_5ptz')]").get_attribute('title')
         content['timestamp'] = datetime.strptime(timestamp, "%m/%d/%y, %H:%M %p")
-        postdate = content['timestamp'].date().isoformat()
+        comments = self.scrape_comments(entry)
+        if comments:
+            for n in list(range(len(comments)))[: self.max_comments]:
+                content['comment_' + str(n)] = comments[n]
 
         try:
             content['text'] = entry.find_element_by_xpath(".//*[@data-testid='post_message']").text
@@ -153,22 +186,30 @@ class FaceBookDriver(webdriver.Firefox):
             content['link'] = ""
 
         if not content['link']:
+            images = None
             try:
-                entry.find_element_by_xpath(".//*[@rel = 'theater']").click()
-                random_sleep(1)
-                Wait(self).until(EC.presence_of_element_located((By.XPATH, "//span[@id='fbPhotoSnowliftTimestamp']")))
-                images = self.scrape_images()
-                for n in list(range(len(images)))[: self.max_images]:
-                    content['image_' + str(n)] = images[n]
+                images = entry.find_elements_by_xpath(".//*[@rel = 'theater']")
 
             except NoSuchElementException:
-                content['video_thumbnail'] = self.scrape_video_thumbnail(entry=entry, author=content['author'],
-                                                                         date=postdate)
+                try:
+                    content['video_thumbnail'] = self.scrape_video_thumbnail(entry=entry, author=content['author'],
+                                                                             date=content['timestamp'].isoformat())
+                except NoSuchElementException:
+                    pass
 
-        comments = self.scrape_comments(entry)
-        if comments:
-            for n in list(range(len(comments)))[: self.max_comments]:
-                content['comment_' + str(n)] = comments[n]
+            # need to split up if images and if_displayed because python attempts .is_displayed even if images is not
+            # true
+            if images:
+                if len(images) == 1 and images[0].is_displayed():
+                    filename = f"{self.images_folder}/{content['author']}_{content['timestamp'].isoformat()}.png"
+                    with open(filename, 'wb') as output:
+                        output.write(images[0].screenshot_as_png)
+
+                elif len(images) > 1 and images[0].is_displayed() and images[0].is_enabled():
+                    images = self.scrape_images(entry)
+                    if images:
+                        for n in list(range(len(images)))[: self.max_images]:
+                            content['image_' + str(n)] = images[n]
 
         return content
 
@@ -185,13 +226,21 @@ class FaceBookDriver(webdriver.Firefox):
 
         return link
 
-    def scrape_images(self):
+    def scrape_images(self, entry):
         # ToDo: Scrape comments to photos.
         """
         Scroll through all the available images and download each image to the provided images_folder. Requires for
         the image to be maximized in the webdriver.
         :return: A list of the file paths.
         """
+        try:
+            entry.find_element_by_xpath(".//*[@rel = 'theater']").click()
+        except ElementClickInterceptedException:
+            return
+
+        random_sleep(1)
+        Wait(self).until(EC.presence_of_element_located((By.XPATH, "//span[@id='fbPhotoSnowliftTimestamp']")))
+
         image_count = 1
         timestamp = self.find_element_by_xpath("//span[@id='fbPhotoSnowliftTimestamp']//abbr").get_attribute('title')
         post_date = datetime.strptime(timestamp, "%A, %B %d, %Y at %I:%M %p").date().isoformat()
@@ -223,6 +272,7 @@ class FaceBookDriver(webdriver.Firefox):
             if image_count > self.max_images:
                 break
 
+            random_sleep(1)
             ActionChains(self).move_to_element(image).perform()
             random_sleep(1)
             # Load next if possible.
@@ -289,7 +339,7 @@ class FaceBookDriver(webdriver.Firefox):
 
         while "more comments" in entry.text:
             entry.find_element_by_xpath(".//*[contains(text(), 'more comments')]").click()
-            random_sleep(1)
+            random_sleep(3)
 
         for button in entry.find_elements_by_xpath(
                 ".//*[@data-testid = 'UFI2CommentsPagerRenderer/pager_depth_1' and @role = 'button']"):
@@ -310,20 +360,22 @@ def main():
     _browser_profile.set_preference("dom.webnotifications.enabled", False)
 
     driver = FaceBookDriver(username=username, password=password, firefox_profile=_browser_profile,
-                            executable_path=webdriver_location, max_scroll_depth=2, max_images=3)
+                            executable_path=webdriver_location, max_scroll_depth=1, max_images=1)
 
-    results = pd.DataFrame()
-    pages = [{"name": "Callan River Wildlife Group", "type": "group", "id": "368961080430162"}]
+    results = []
 
-    for page in pages:
+    for page in parameters.pages:
         # for page in parameters.pages:
         if page['type'] == 'group':
-            result = driver.scrape_page(f"https://www.facebook.com/groups/" + page['id'])
+            result = driver.scrape_page(f"https://www.facebook.com/groups/{page['id']}", _type="group")
 
         elif page['type'] == 'page':
-            result = driver.scrape_page(f"https://www.facebook.com/" + page['id'])
+            result = driver.scrape_page(f"https://www.facebook.com/{page['id']}/posts/", _type="page")
 
-        results = results.append(result).reset_index(drop=True)
+        results['page'] = page['name']
+        results = results + [result]
+
+    return results
 
 
 if __name__ == "__main__":
