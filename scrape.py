@@ -183,7 +183,7 @@ class FaceBookDriver(webdriver.Firefox):
         content['timestamp'] = datetime.strptime(timestamp, "%m/%d/%y, %H:%M %p")
         comments = self.scrape_comments(entry)
         if comments:
-            for num, comment in enumerate(comments)[: self.max_comments]:
+            for num, comment in enumerate(comments[: self.max_comments]):
                 content['comment_' + str(num)] = comment
 
         if "See More" in entry.text:
@@ -222,8 +222,8 @@ class FaceBookDriver(webdriver.Firefox):
             elif len(images) > 1 and images[0].is_displayed():
                 images = self.scrape_images(entry)
                 if images:
-                    for n in list(range(len(images)))[: self.max_images]:
-                        content['image_' + str(n)] = images[n]
+                    for num, image in enumerate(images)[: self.max_images]:
+                        content['image_' + num] = image
 
         else:
             try:
@@ -268,6 +268,12 @@ class FaceBookDriver(webdriver.Firefox):
         the image to be maximized in the webdriver.
         :return: A list of the file paths.
         """
+
+        try:
+            n_images = int(entry.find_element_by_xpath(".//*[@class='_52db']").text.strip('+')) + 3
+        except NoSuchElementException:
+            n_images = len(entry.find_elements_by_xpath(".//*[@rel = 'theater']"))
+
         for image in entry.find_elements_by_xpath(".//*[@rel = 'theater']"):
             try:
                 image.click()
@@ -285,7 +291,7 @@ class FaceBookDriver(webdriver.Firefox):
         post_date = datetime.strptime(timestamp, "%A, %B %d, %Y at %I:%M %p").date().isoformat()
         filenames = []
 
-        while True:
+        for _ in range(n_images-1):  # -1 because we need one click to go from first to second image.
             # In some cases, facebook allows users to click through galeries and access previous image posts. Prevent!
             timestamp = self.find_element_by_xpath(
                 "//span[@id='fbPhotoSnowliftTimestamp']//abbr").get_attribute('title')
@@ -300,7 +306,7 @@ class FaceBookDriver(webdriver.Firefox):
                 author = self.find_element_by_xpath("//div[@id='fbPhotoSnowliftAuthorName']/a[1]").text
             author = author.replace(" ", "_")
 
-            filename = f"{self.images_folder}/{author}_{image_count}_{image_time}.png"
+            filename = f"{self.images_folder}/{author}_{image_time.isoformat()}.png"
 
             image = self.find_element_by_class_name("spotlight")
             image.screenshot(filename)
@@ -379,9 +385,11 @@ class FaceBookDriver(webdriver.Firefox):
         """
         self.execute_script("arguments[0].scrollIntoView();", entry)
         ActionChains(self).move_to_element(entry).perform()
+        sleep(0.5)
 
         while "more comments" in entry.text:
             self.execute_script("window.scrollTo(0, 0);")
+            sleep(0.5)
             entry.find_element_by_xpath(".//*[contains(text(), 'more comments')]").click()
             random_sleep(3)
 
@@ -405,11 +413,13 @@ def main():
     _browser_profile.set_preference("dom.webnotifications.enabled", False)
 
     driver = FaceBookDriver(username=username, password=password, firefox_profile=_browser_profile,
-                            executable_path=webdriver_location)
+                            executable_path=webdriver_location,
+                            max_scroll_depth=1, max_images=2
+                            )
 
     results = []
 
-    for page in parameters.pages:
+    for page in [parameters.pages[0], parameters.pages[2]]:
         # for page in parameters.pages:
         if page['type'] == 'group':
             result = driver.scrape_page(f"https://www.facebook.com/groups/{page['id']}", _type="group")
