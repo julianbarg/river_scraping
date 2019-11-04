@@ -75,9 +75,12 @@ class FaceBookDriver(webdriver.Firefox):
         self.attempts = 0
 
         self.xpaths = {"group": {"entries": "//div[starts-with(@id, 'mall_post_')]",
-                                 "thumbnail": ".//img[starts-with(@class, '_1445')]"},
+                                 "thumbnail": [".//img[starts-with(@class, '_1445')]",
+                                               ".//img[@class = 'scaledImageFitWidth img']",
+                                               ".//a/div/img"]},
                        "page": {"entries": "//div[@id = 'pagelet_timeline_main_column']//div[@class = '_4-u2 _4-u8']",
-                                "thumbnail": ".//img[@class = 'scaledImageFitWidth img']"}
+                                "thumbnail": [".//img[@class = 'scaledImageFitWidth img']",
+                                              ".//a/div/img"]}
                        }
         # For tracking whether we ar currently scraping a page or a  group.
         self._type = None
@@ -204,14 +207,10 @@ class FaceBookDriver(webdriver.Firefox):
         images = None
         try:
             images = entry.find_elements_by_xpath(".//*[@rel = 'theater']")
-
-        # If there is no image, get video thumbnail.
+        # If there is no image, get thumbnail.
         except NoSuchElementException:
-            try:
-                content['image_0'] = self.scrape_thumbnail(entry=entry, author=content['author'],
-                                                                   date=content['timestamp'].isoformat())
-            except NoSuchElementException:
-                pass
+            content['image_0'] = self.scrape_thumbnail(entry=entry, author=content['author'],
+                                                       date=content['timestamp'].isoformat())
 
         # need to split up if images and if_displayed because python attempts .is_displayed even if images is not
         # true
@@ -219,8 +218,7 @@ class FaceBookDriver(webdriver.Firefox):
             if len(images) == 1 and images[0].is_displayed():
                 filename = f"{self.images_folder}/{content['author']}_{content['timestamp'].isoformat()}.png"
                 content["image_0"] = filename
-                with open(filename, 'wb') as output:
-                    output.write(images[0].screenshot_as_png)
+                images[0].screenshot(filename)
 
             elif len(images) > 1 and images[0].is_displayed():
                 images = self.scrape_images(entry)
@@ -231,7 +229,7 @@ class FaceBookDriver(webdriver.Firefox):
         else:
             try:
                 content['image_0'] = self.scrape_thumbnail(entry=entry, author=content['author'],
-                                                                   date=content['timestamp'].isoformat())
+                                                           date=content['timestamp'].isoformat())
             except NoSuchElementException:
                 pass
 
@@ -292,7 +290,8 @@ class FaceBookDriver(webdriver.Firefox):
             # In some cases, facebook allows users to click through galeries and access previous image posts. Prevent!
             timestamp = self.find_element_by_xpath(
                 "//span[@id='fbPhotoSnowliftTimestamp']//abbr").get_attribute('title')
-            image_date = datetime.strptime(timestamp, "%A, %B %d, %Y at %I:%M %p").date().isoformat()
+            image_time = datetime.strptime(timestamp, "%A, %B %d, %Y at %I:%M %p")
+            image_date = image_time.date().isoformat()
             if image_date != post_date:
                 break
 
@@ -302,12 +301,10 @@ class FaceBookDriver(webdriver.Firefox):
                 author = self.find_element_by_xpath("//div[@id='fbPhotoSnowliftAuthorName']/a[1]").text
             author = author.replace(" ", "_")
 
-            filename = f"{self.images_folder}/{author}_{image_count}_{image_date}.png"
+            filename = f"{self.images_folder}/{author}_{image_count}_{image_time}.png"
 
             image = self.find_element_by_class_name("spotlight")
-            with open(filename, 'wb') as output:
-                output.write(image.screenshot_as_png)
-
+            image.screenshot('filename')
             filenames = filenames + [filename]
 
             image_count += 1
@@ -342,13 +339,16 @@ class FaceBookDriver(webdriver.Firefox):
         :return: File path of the video thumbnail.
         """
         author = author.replace(" ", "_")
-        thumbnail = entry.find_element_by_xpath(self.xpaths[self._type]['thumbnail'])
+        xpaths = self.xpaths[self._type]['thumbnail']
         filename = f"{self.thumbnails_folder}/{author}_{date}.png"
-        with open(filename, 'wb') as output:
-            output.write(thumbnail.screenshot_as_png)
+        for xpath in xpaths:
+            try:
+                entry.find_element_by_xpath(xpath).screenshot(filename)
+                return filename
+            except NoSuchElementException:
+                pass
 
-
-        return filename
+        return
 
     def scrape_comments(self, entry):
         """
@@ -369,7 +369,7 @@ class FaceBookDriver(webdriver.Firefox):
             comments = [re.sub(tail, "", comment, flags=re.DOTALL) for comment in comments]
             comments = [re.sub(likes, "", comment, flags=re.DOTALL) for comment in comments]
             comments = [comment.strip() for comment in comments]
-            comments = [comment.strip("\nHide or report this")]
+            comments = [comment.strip("\nHide or report this") for comment in comments]
 
         return comments
 
@@ -404,7 +404,7 @@ def main():
     _browser_profile.set_preference("dom.webnotifications.enabled", False)
 
     driver = FaceBookDriver(username=username, password=password, firefox_profile=_browser_profile,
-                            executable_path=webdriver_location, max_scroll_depth=1, max_images=1)
+                            executable_path=webdriver_location, max_scroll_depth=None, max_images=1)
 
     results = []
 
@@ -420,7 +420,9 @@ def main():
             entry.update({'page': page['name']})
         results = results + result
 
-    return results
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(parameters.destination + ".csv", index=False, encoding='utf-16')
+    results_df.to_excel(parameters.destination + ".xlsx", index=False)
 
 
 if __name__ == "__main__":
