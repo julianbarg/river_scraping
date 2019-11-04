@@ -157,11 +157,10 @@ class FaceBookDriver(webdriver.Firefox):
             len_previous = len(self.page_source)
 
             self.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            random_sleep(3)
 
             if len(self.page_source) == len_previous:
                 break
-
-            random_sleep(2)
 
             scrolled += 1
             if self.max_scroll_depth and scrolled == self.max_scroll_depth:
@@ -184,8 +183,8 @@ class FaceBookDriver(webdriver.Firefox):
         content['timestamp'] = datetime.strptime(timestamp, "%m/%d/%y, %H:%M %p")
         comments = self.scrape_comments(entry)
         if comments:
-            for n in list(range(len(comments)))[: self.max_comments]:
-                content['comment_' + str(n)] = comments[n]
+            for num, comment in enumerate(comments)[: self.max_comments]:
+                content['comment_' + str(num)] = comment
 
         if "See More" in entry.text:
             try:
@@ -304,7 +303,7 @@ class FaceBookDriver(webdriver.Firefox):
             filename = f"{self.images_folder}/{author}_{image_count}_{image_time}.png"
 
             image = self.find_element_by_class_name("spotlight")
-            image.screenshot('filename')
+            image.screenshot(filename)
             filenames = filenames + [filename]
 
             image_count += 1
@@ -382,11 +381,13 @@ class FaceBookDriver(webdriver.Firefox):
         ActionChains(self).move_to_element(entry).perform()
 
         while "more comments" in entry.text:
+            self.execute_script("window.scrollTo(0, 0);")
             entry.find_element_by_xpath(".//*[contains(text(), 'more comments')]").click()
             random_sleep(3)
 
         for button in entry.find_elements_by_xpath(
                 ".//*[@data-testid = 'UFI2CommentsPagerRenderer/pager_depth_1' and @role = 'button']"):
+            self.execute_script("window.scrollTo(0, 0);")
             button.click()
 
 
@@ -404,11 +405,11 @@ def main():
     _browser_profile.set_preference("dom.webnotifications.enabled", False)
 
     driver = FaceBookDriver(username=username, password=password, firefox_profile=_browser_profile,
-                            executable_path=webdriver_location, max_scroll_depth=None, max_images=1)
+                            executable_path=webdriver_location)
 
     results = []
 
-    for page in [parameters.pages[0], parameters.pages[2]]:
+    for page in parameters.pages:
         # for page in parameters.pages:
         if page['type'] == 'group':
             result = driver.scrape_page(f"https://www.facebook.com/groups/{page['id']}", _type="group")
