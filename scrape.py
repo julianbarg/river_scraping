@@ -13,6 +13,9 @@ from datetime import datetime
 from functools import partial
 import re
 
+# Importing pandas is kind of overkill, since we only really need it to parse the timestamp into the .csv output. But we
+# we will do it anyways, since elegance (and, by extension, hassle-free development) is more important to us than
+# performance.
 import pandas as pd
 
 Wait = partial(WebDriverWait, timeout=15)
@@ -71,10 +74,14 @@ class FaceBookDriver(webdriver.Firefox):
         self.max_attempts = max_attempts
         self.attempts = 0
 
-        self.xpaths = {"group": {"entries": "//div[starts-with(@id, 'mall_post_')]"},
-                       "page": {
-                           "entries": "//div[@id = 'pagelet_timeline_main_column']//div[@class = '_4-u2 _4-u8']"}
+        self.xpaths = {"group": {"entries": "//div[starts-with(@id, 'mall_post_')]",
+                                 "thumbnail": ".//img[starts-with(@class, '_1445')]"},
+                       "page": {"entries": "//div[@id = 'pagelet_timeline_main_column']//div[@class = '_4-u2 _4-u8']",
+                                "thumbnail": ".//img[@class = 'scaledImageFitWidth img']"}
                        }
+        # For tracking whether we ar currently scraping a page or a  group.
+        self._type = None
+
         self.login_fb()
 
     def login_fb(self):
@@ -95,13 +102,11 @@ class FaceBookDriver(webdriver.Firefox):
 
         # Wait(self).until(EC.presence_of_element_located((By.ID, "newsFeedHeading")))
 
-    def load_page(self, page: str, _type: str):
+    def load_page(self, page: str):
         """
         Load a page.
         :param page: Link to the site.
-        :param _type: Whether the page is a facebook group or a facebook page.
         """
-
         if self.attempts > self.max_attempts:
             raise TooManyAttemptsError
 
@@ -109,32 +114,34 @@ class FaceBookDriver(webdriver.Firefox):
         random_sleep(1)
 
         try:
-            Wait(self).until(EC.presence_of_element_located((By.XPATH, self.xpaths[_type]["entries"])))
+            Wait(self).until(EC.presence_of_element_located((By.XPATH, self.xpaths[self._type]["entries"])))
             random_sleep(1)
         except TimeoutException:
             self.attempts += 1
-            self.load_page(page=page, _type=_type)
+            self.load_page(page=page)
 
     def scrape_page(self, page: str, _type: str):
         """
         Load and scrape one specific page.
         :param page: Link to the facebook page to be scraped.
-        :param _type: Whether the page is a facebook group or a facebook page.
+        :param _type: Whether the link to be scraped is a group or a page.
         :return: Dictionary with the contents of the page.
         """
-        columns = ['author', 'timestamp', 'link', 'text', 'video_thumbnail']
-        columns = columns + ['comment_' + str(comment) for comment in range(self.max_comments)]
-        columns = columns + ['image_' + str(image) for image in range(self.max_images)]
-        contents = pd.DataFrame(columns=columns)
+        # columns = ['author', 'timestamp', 'link', 'text', 'video_thumbnail']
+        # columns = columns + ['comment_' + str(comment) for comment in range(self.max_comments)]
+        # columns = columns + ['image_' + str(image) for image in range(self.max_images)]
+        # contents = pd.DataFrame(columns=columns)
+        contents = []
+        self._type = _type
 
-        self.load_page(page=page, _type=_type)
+        self.load_page(page=page)
         self.scroll_to_bottom()
 
         entries = self.find_elements_by_xpath(self.xpaths[_type]["entries"])
 
         for entry in entries:
             content = self.scrape_entry(entry=entry)
-            contents = contents.append(content, ignore_index=True)
+            contents = contents + [content]
 
         return contents
 
@@ -167,6 +174,8 @@ class FaceBookDriver(webdriver.Firefox):
 
         content = {}
 
+        content['unavailable'] = bool("This content isn't available right now" in entry.text)
+
         content['author'] = entry.find_element_by_xpath(".//span[starts-with(@class, 'fwb')]/a").text
         timestamp = entry.find_element_by_xpath(".//*[starts-with(@class, '_5ptz')]").get_attribute('title')
         content['timestamp'] = datetime.strptime(timestamp, "%m/%d/%y, %H:%M %p")
@@ -175,41 +184,56 @@ class FaceBookDriver(webdriver.Firefox):
             for n in list(range(len(comments)))[: self.max_comments]:
                 content['comment_' + str(n)] = comments[n]
 
+        if "See More" in entry.text:
+            try:
+                entry.find_element_by_xpath(".//*[text()='See More']").click()
+            except ElementClickInterceptedException:
+                pass
         try:
             content['text'] = entry.find_element_by_xpath(".//*[@data-testid='post_message']").text
         except NoSuchElementException:
             content['text'] = ''
 
-        if "shared a link" in entry.text:
-            content['link'] = self.scrape_link(entry)
-        else:
-            content['link'] = ""
+        content['link'] = ""
+        # In groups, fortunately, when a link is shared, it will say so in the post. For pages, we have to check
+        # manually.
+        if ("shared a link" in entry.text) or (self._type == "page"):
+            content['link'] = self.scrape_link(entry=entry)
 
-        if not content['link']:
-            images = None
+        # See if there is image in post.
+        images = None
+        try:
+            images = entry.find_elements_by_xpath(".//*[@rel = 'theater']")
+
+        # If there is no image, get video thumbnail.
+        except NoSuchElementException:
             try:
-                images = entry.find_elements_by_xpath(".//*[@rel = 'theater']")
-
+                content['image_0'] = self.scrape_thumbnail(entry=entry, author=content['author'],
+                                                                   date=content['timestamp'].isoformat())
             except NoSuchElementException:
-                try:
-                    content['video_thumbnail'] = self.scrape_video_thumbnail(entry=entry, author=content['author'],
-                                                                             date=content['timestamp'].isoformat())
-                except NoSuchElementException:
-                    pass
+                pass
 
-            # need to split up if images and if_displayed because python attempts .is_displayed even if images is not
-            # true
-            if images:
-                if len(images) == 1 and images[0].is_displayed():
-                    filename = f"{self.images_folder}/{content['author']}_{content['timestamp'].isoformat()}.png"
-                    with open(filename, 'wb') as output:
-                        output.write(images[0].screenshot_as_png)
+        # need to split up if images and if_displayed because python attempts .is_displayed even if images is not
+        # true
+        if images:
+            if len(images) == 1 and images[0].is_displayed():
+                filename = f"{self.images_folder}/{content['author']}_{content['timestamp'].isoformat()}.png"
+                content["image_0"] = filename
+                with open(filename, 'wb') as output:
+                    output.write(images[0].screenshot_as_png)
 
-                elif len(images) > 1 and images[0].is_displayed() and images[0].is_enabled():
-                    images = self.scrape_images(entry)
-                    if images:
-                        for n in list(range(len(images)))[: self.max_images]:
-                            content['image_' + str(n)] = images[n]
+            elif len(images) > 1 and images[0].is_displayed():
+                images = self.scrape_images(entry)
+                if images:
+                    for n in list(range(len(images)))[: self.max_images]:
+                        content['image_' + str(n)] = images[n]
+
+        else:
+            try:
+                content['image_0'] = self.scrape_thumbnail(entry=entry, author=content['author'],
+                                                                   date=content['timestamp'].isoformat())
+            except NoSuchElementException:
+                pass
 
         return content
 
@@ -219,10 +243,24 @@ class FaceBookDriver(webdriver.Firefox):
         :param entry: Web element of the link post, obtained through the drivers find_element(s) method.
         :return: The link.
         """
-        # By moving the mouse to the entry, we cause facebook to display the original URL rather than a facebook link.
-        self.execute_script("arguments[0].scrollIntoView();", entry)
-        ActionChains(self).move_to_element(entry).perform()
-        link = entry.find_element_by_xpath(".//div[@class='mtm']//a").get_attribute("href")
+        if self._type == "group":
+            # Make link appear by moving mouse to it.
+            self.execute_script("arguments[0].scrollIntoView();", entry)
+            ActionChains(self).move_to_element(entry).perform()
+            link = entry.find_element_by_xpath(".//div[@class='mtm']//a").get_attribute("href")
+
+        elif self._type == "page":
+            try:
+                link = entry.find_element_by_xpath(".//a[@class = '_52c6']")
+            except NoSuchElementException:
+                return None
+            if link.is_displayed():
+                # Make link appear by moving mouse to it.
+                self.execute_script("arguments[0].scrollIntoView();", entry)
+                ActionChains(self).move_to_element(link).perform()
+                return entry.find_element_by_xpath(".//a[@class = '_52c6']").get_attribute('href')
+            else:
+                return None
 
         return link
 
@@ -233,9 +271,13 @@ class FaceBookDriver(webdriver.Firefox):
         the image to be maximized in the webdriver.
         :return: A list of the file paths.
         """
-        try:
-            entry.find_element_by_xpath(".//*[@rel = 'theater']").click()
-        except ElementClickInterceptedException:
+        for image in entry.find_elements_by_xpath(".//*[@rel = 'theater']"):
+            try:
+                image.click()
+                break
+            except ElementClickInterceptedException:
+                pass
+        else:
             return
 
         random_sleep(1)
@@ -291,7 +333,7 @@ class FaceBookDriver(webdriver.Firefox):
         random_sleep(1)
         return filenames
 
-    def scrape_video_thumbnail(self, entry, author, date):
+    def scrape_thumbnail(self, entry, author, date):
         """
         Obtain the thumbnail of a video in a facebook post.
         :param entry: Web element of the entry, obtained through the drivers find_element(s) method.
@@ -300,10 +342,11 @@ class FaceBookDriver(webdriver.Firefox):
         :return: File path of the video thumbnail.
         """
         author = author.replace(" ", "_")
-        thumbnail = entry.find_element_by_xpath(".//img[starts-with(@class, '_1445')]")
+        thumbnail = entry.find_element_by_xpath(self.xpaths[self._type]['thumbnail'])
         filename = f"{self.thumbnails_folder}/{author}_{date}.png"
         with open(filename, 'wb') as output:
             output.write(thumbnail.screenshot_as_png)
+
 
         return filename
 
@@ -326,6 +369,7 @@ class FaceBookDriver(webdriver.Firefox):
             comments = [re.sub(tail, "", comment, flags=re.DOTALL) for comment in comments]
             comments = [re.sub(likes, "", comment, flags=re.DOTALL) for comment in comments]
             comments = [comment.strip() for comment in comments]
+            comments = [comment.strip("\nHide or report this")]
 
         return comments
 
@@ -364,7 +408,7 @@ def main():
 
     results = []
 
-    for page in parameters.pages:
+    for page in [parameters.pages[0], parameters.pages[2]]:
         # for page in parameters.pages:
         if page['type'] == 'group':
             result = driver.scrape_page(f"https://www.facebook.com/groups/{page['id']}", _type="group")
@@ -372,8 +416,9 @@ def main():
         elif page['type'] == 'page':
             result = driver.scrape_page(f"https://www.facebook.com/{page['id']}/posts/", _type="page")
 
-        result['page'] = page['name']
-        results = results + [result]
+        for entry in result:
+            entry.update({'page': page['name']})
+        results = results + result
 
     return results
 
