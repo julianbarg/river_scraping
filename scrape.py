@@ -545,8 +545,9 @@ def main():
     results = results + result
 
     results_df = df(results)
-    results_df.to_csv(parameters.destination + "/" + page['name'].replace(" ", "_") + ".csv",
-                      index=False, encoding='utf-16')
+    results_df.to_csv(
+        f"{parameters.destination}/{page['name'].replace(' ', '_')}_{datetime.today().date().isoformat()}.csv",
+        index=False, encoding='utf-16')
     results_df = results_df.applymap(lambda x: x.encode('unicode_escape').decode('utf-8') if isinstance(x, str) else x)
     results_df.to_excel(parameters.destination + "/" + page['name'].replace(" ", "_") + ".xlsx", index=False)
 
