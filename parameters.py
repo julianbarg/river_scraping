@@ -1,10 +1,12 @@
 from sys import platform
 
 if platform.startswith("win"):
-    webdriver_location = 'geckodriver.exe'
+    chrome_location = 'chromedriver.exe'
+    firefox_location = 'geckodriver.exe'
 
-if platform == 'linux':
-    webdriver_location = './geckodriver'
+elif platform == 'linux':
+    chrome_location = './chromedriver'
+    firefox_location = './geckodriver'
 
 wait_time = 15
 
