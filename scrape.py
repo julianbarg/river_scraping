@@ -544,18 +544,19 @@ def main():
         entry.update({'page': page['name']})
     results = results + result
 
+    file_name = f"{parameters.destination}/{page['name'].replace(' ', '_')}_{datetime.today().date().isoformat()}"
     results_df = df(results)
-    results_df.to_csv(
-        f"{parameters.destination}/{page['name'].replace(' ', '_')}_{datetime.today().date().isoformat()}.csv",
-        index=False, encoding='utf-16')
+    results_df.to_csv(file_name + ".csv", index=False, encoding='utf-16')
     results_df = results_df.applymap(lambda x: x.encode('unicode_escape').decode('utf-8') if isinstance(x, str) else x)
-    results_df.to_excel(parameters.destination + "/" + page['name'].replace(" ", "_") + ".xlsx", index=False)
+    results_df.to_excel(file_name + ".xlsx", index=False)
 
-    print(f"""Scraping {page.name} complete.
-    Screenshot errors: {self.screenshot_error}
-    No screenshot:     {self.no_screenshot}
-    Preview issues:    {self.preview_issue}
-    Image issues:      {self.image_issue}""")
+    print(f"""Scraping {page['name']} complete.
+    Screenshot errors: {driver.screenshot_error}
+    No screenshot:     {driver.no_screenshot}
+    Preview issues:    {driver.preview_issue}
+    Image issues:      {driver.image_issue}""")
+
+    driver.close()
 
 if __name__ == "__main__":
     pass
