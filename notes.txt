@@ -1,0 +1,8 @@
+Known limitations/issues
+- Image scraping aborted when there are videos within photo galleries
+- In the current version, caps the number of images that are scraped per post to 10 and the number of
+  comments that are scraped to 25. This is not a hard limit, and can be set to "None".
+- Does not copy full links from comments
+- Comments not separated from comment author
+- Does not record likes
+- Not scraping visitor posts to pages (groups do not allow for visitor posts)
